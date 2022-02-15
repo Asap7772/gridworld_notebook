@@ -931,6 +931,7 @@ def conservative_q_iteration(
 
     q_values = np.zeros((dS, dA))
     kls, evals = [],[]
+    qmax, qmin, qavg, qstd = [], [],[], []
     for i in range(num_itrs):
         if sampled:
             for j in range(project_steps):
@@ -947,6 +948,12 @@ def conservative_q_iteration(
         else:
             target_values = q_backup_sparse(env, q_values, **kwargs)
             q_values = project_qvalues_cql(target_values, network, optimizer,weights=weights_tensor, cql_alpha=cql_alpha, num_steps=project_steps, transform_type=transform_type, const_transform=const_transform)
+        
+        qmax.append(q_values.max())
+        qmin.append(q_values.min())
+        qavg.append(q_values.mean())
+        qstd.append(q_values.std())
+
         if render:
             plot_sa_values(env, q_values, update=True, title='Q-values Iteration ' + str(i).zfill(3), prefix=prefix)
         if optimal_policy is not None:
@@ -977,7 +984,53 @@ def conservative_q_iteration(
     to_log={full_name: plot}
     to_log.update(custom_log)
     wandb.log(to_log, step=0)
-  
+
+    fig = plt.figure()
+    plt.plot(qavg)
+    title = 'Q Prediction Mean'
+    plt.title(title)
+
+    plot = wandb.Image(fig)
+    full_name = prefix + title
+    to_log={full_name: plot}
+    to_log.update(custom_log)
+    wandb.log(to_log, step=0)
+
+    fig = plt.figure()
+    plt.plot(qmax)
+    title = 'Q Prediction Max'
+    plt.title(title)
+
+    plot = wandb.Image(fig)
+    full_name = prefix + title
+    to_log={full_name: plot}
+    to_log.update(custom_log)
+    wandb.log(to_log, step=0)
+
+    fig = plt.figure()
+    plt.plot(qmin)
+    title = 'Q Prediction Min'
+    plt.title(title)
+
+    plot = wandb.Image(fig)
+    full_name = prefix + title
+    to_log={full_name: plot}
+    to_log.update(custom_log)
+    wandb.log(to_log, step=0)
+    
+    fig = plt.figure()
+    plt.plot(qstd)
+    title = 'Q Prediction Std'
+    plt.title(title)
+
+    plot = wandb.Image(fig)
+    full_name = prefix + title
+    to_log={full_name: plot}
+    to_log.update(custom_log)
+    wandb.log(to_log, step=0)
+
+    plot_sa_values(env, q_values, update=True, title='Final Q values', prefix=prefix)
+
     return q_values
 
 """## Experiments
