@@ -860,7 +860,7 @@ def get_fg(transform_type, const_val):
         if return_weight:
             return weight
 
-        weight = weight/weight.sum(dim=1, keepdim=True) * batch_size # normalize to sum to batch size (sxa in the case of the gridworld env)
+        weight = weight/weight.sum() * batch_size # normalize to sum to batch size (sxa in the case of the gridworld env)
         return  q_arr * weight
 
     def norm_neg_xexp_transform_fn(q_arr, return_weight=False, other_net_qval=None):
