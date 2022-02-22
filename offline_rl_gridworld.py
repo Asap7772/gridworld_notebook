@@ -1,4 +1,10 @@
 import argparse
+from collections import defaultdict
+from distutils.command.config import config
+from foo import Nop
+import numpy as np
+import torch
+
 parser = argparse.ArgumentParser(description='CQL Hyper Parameters')
 parser.add_argument('--exp_start', type=str, default='cql')
 
@@ -13,15 +19,116 @@ parser.add_argument('--transform_type', type=int, default=0)
 parser.add_argument('--const_transform', type=float, default=1)
 parser.add_argument('--proj_name', type=str, default='algo_gridworlds')
 parser.add_argument('--render', action='store_true')
+parser.add_argument('--nowandb', action='store_true')
+
+parser.add_argument('--savepath', type=str, default='/nfs/kun1/users/asap7772/algo_gridworld/data/')
+parser.add_argument('--hotstart', action='store_true')
+parser.add_argument('--hotstart_it', type=int, default=0)
+parser.add_argument('--othernet', action='store_true') 
+parser.add_argument('--load_network', type=str, default='')
+parser.add_argument('--loadnoinit', action='store_true')
+
+#@title Neural Network Code
+
+def stack_observations(env):
+    obs = []
+    for s in range(env.num_states):
+        obs.append(env.observation(s))
+    return np.stack(obs)
+
+class FCNetwork(torch.nn.Module):
+    def __init__(self, env, layers=[20,20]):
+        super(FCNetwork, self).__init__()
+        self.all_observations = torch.tensor(stack_observations(env), dtype=torch.float32)
+        dim_input = env.dim_obs
+        dim_output = env.num_actions
+        net_layers = []
+
+        dim = dim_input
+        for i, layer_size in enumerate(layers):
+            net_layers.append(torch.nn.Linear(dim, layer_size))
+            net_layers.append(torch.nn.ReLU())
+            dim = layer_size
+        net_layers.append(torch.nn.Linear(dim, dim_output))
+        self.layers = net_layers
+        self.network = torch.nn.Sequential(*net_layers)
+
+    def forward(self, states):
+        observations = torch.index_select(self.all_observations, 0, states) 
+        return self.network(observations)
+
+
+def one_hot(y, n_dims=None):
+    """ Take integer y (tensor or variable) with n dims and convert it to 1-hot representation with n+1 dims. """
+    y_tensor = y.view(-1, 1)
+    n_dims = n_dims if n_dims is not None else int(torch.max(y_tensor)) + 1
+    y_one_hot = torch.zeros(y_tensor.size()[0], n_dims).scatter_(1, y_tensor, 1)
+    y_one_hot = y_one_hot.view(*y.shape, -1)
+    return y_one_hot
+
+
+class TabularNetwork(torch.nn.Module):
+    def __init__(self, env):
+        super(TabularNetwork, self).__init__()
+        self.num_states = env.num_states
+        self.network = torch.nn.Sequential(
+                        torch.nn.Linear(self.num_states, env.num_actions)
+        )
+
+    def forward(self, states):
+        onehot = one_hot(states, self.num_states)
+        return self.network(onehot)
+
+
 args = parser.parse_args()
 
 all_args = vars(args)
-name = '{}_dataset{}_size{}_env{}_minq{}_ttype{}_const{}'.format(args.exp_start, args.dataset_composition, args.dataset_size, args.env_type, args.cql_alpha_val, args.transform_type, args.const_transform)
+name = '{}_maze{}_dataset{}_size{}_env{}_minq{}_ttype{}_const{}'.format(args.exp_start, args.maze_type, args.dataset_composition, args.dataset_size, args.env_type, args.cql_alpha_val, args.transform_type, args.const_transform)
+
+if args.hotstart:
+    print('hotstart')
+    name = '{}_hotstart{}'.format(name, args.hotstart_it)
+    if args.othernet:
+        name = '{}_othernet'.format(name)
+
+if args.load_network != '':
+    print('loading networks + qvalues')
+    name = '{}_load'.format(name)
+
+    if args.loadnoinit:
+        name = '{}_noinit'.format(name)
+
+    folder_path = args.load_network
+    q_values_path = '{}/q_values.npy'.format(folder_path)
+    net_full_path = '{}/net_full.pt'.format(folder_path)
+    net_limited_path = '{}/net_limited.pt'.format(folder_path)
+
+    loaded_q_values = np.load(q_values_path)
+    loaded_net_full = torch.load(net_full_path)
+    loaded_net_limited = torch.load(net_limited_path)
+else:
+    loaded_q_values = loaded_net_full = loaded_net_limited = None
+
+
+import os
+savepath = os.path.join(args.savepath + name)
+os.makedirs(savepath,exist_ok=True)
+print("Directory '%s' created" %savepath)
+print()
+
+f = open(os.path.join(savepath, 'args.json'), 'w+')
+f.write(str(all_args))
+f.close()
 
 import wandb
-wandb.init(project=args.proj_name, reinit=True)
-wandb.run.name = name
-wandb.config.update(all_args)
+
+if args.nowandb:
+    wandb = Nop
+    wandb.Image = lambda x: x
+else:
+    wandb.init(project=args.proj_name, reinit=True)
+    wandb.run.name = name
+    wandb.config.update(all_args)
 
 # Commented out IPython magic to ensure Python compatibility.
 #@title Imports
@@ -33,6 +140,7 @@ import matplotlib.cm as cm
 from matplotlib.patches import Rectangle, Polygon
 from IPython.display import clear_output
 import torch
+import torch.nn.functional as F
 # %matplotlib inline
 
 #@title Environment Code
@@ -466,56 +574,6 @@ def plot_s_values(env, v_values, text_values=True, invert_y=True, update=False,t
     
     plt.close()
 
-#@title Neural Network Code
-
-def stack_observations(env):
-    obs = []
-    for s in range(env.num_states):
-        obs.append(env.observation(s))
-    return np.stack(obs)
-
-class FCNetwork(torch.nn.Module):
-    def __init__(self, env, layers=[20,20]):
-        super(FCNetwork, self).__init__()
-        self.all_observations = torch.tensor(stack_observations(env), dtype=torch.float32)
-        dim_input = env.dim_obs
-        dim_output = env.num_actions
-        net_layers = []
-
-        dim = dim_input
-        for i, layer_size in enumerate(layers):
-            net_layers.append(torch.nn.Linear(dim, layer_size))
-            net_layers.append(torch.nn.ReLU())
-            dim = layer_size
-        net_layers.append(torch.nn.Linear(dim, dim_output))
-        self.layers = net_layers
-        self.network = torch.nn.Sequential(*net_layers)
-
-    def forward(self, states):
-        observations = torch.index_select(self.all_observations, 0, states) 
-        return self.network(observations)
-
-
-def one_hot(y, n_dims=None):
-    """ Take integer y (tensor or variable) with n dims and convert it to 1-hot representation with n+1 dims. """
-    y_tensor = y.view(-1, 1)
-    n_dims = n_dims if n_dims is not None else int(torch.max(y_tensor)) + 1
-    y_one_hot = torch.zeros(y_tensor.size()[0], n_dims).scatter_(1, y_tensor, 1)
-    y_one_hot = y_one_hot.view(*y.shape, -1)
-    return y_one_hot
-
-
-class TabularNetwork(torch.nn.Module):
-    def __init__(self, env):
-        super(TabularNetwork, self).__init__()
-        self.num_states = env.num_states
-        self.network = torch.nn.Sequential(
-                        torch.nn.Linear(self.num_states, env.num_actions)
-        )
-
-    def forward(self, states):
-        onehot = one_hot(states, self.num_states)
-        return self.network(onehot)
 
 #@title Utility Functions
 
@@ -765,20 +823,23 @@ def fitted_q_iteration(env,
 
 def get_fg(transform_type, const_val):
     
-    def tanh_transform_fn(q_arr):
+    def tanh_transform_fn(q_arr, return_weight=False, other_net_qval=None):
         return const_val * torch.tanh(q_arr/ (const_val + 1e-9)) 
     
-    def exp_transform_fn(q_arr):
+    def exp_transform_fn(q_arr, return_weight=False, other_net_qval=None):
         return torch.exp(q_arr/ (const_val + 1e-9)) 
     
-    def cent_xexp_transform_fn(q_arr):
+    def cent_xexp_transform_fn(q_arr, return_weight=False, other_net_qval=None):
         cent = q_arr.mean().detach()
         q_cent = (q_arr - cent) / (const_val + 1e-9)
         return  q_cent * torch.exp(q_cent)
     
-    def norm_xexp_transform_fn(q_arr, return_weight=False):
+    def norm_xexp_transform_fn(q_arr, return_weight=False, other_net_qval=None):
         batch_size = q_arr.shape[0]
-        q_new = (q_arr/(const_val + 1e-9))
+        if other_net_qval is None:
+            q_new = (q_arr/(const_val + 1e-9))
+        else:
+            q_new = (other_net_qval/(const_val + 1e-9))
         q_new = q_new - q_new.max()
         weight = torch.exp(q_new)/(torch.exp(q_new).sum() + 1e-9)
         weight = weight.detach()
@@ -787,7 +848,19 @@ def get_fg(transform_type, const_val):
             return weight
         return  q_arr * weight * batch_size
 
-    def norm_neg_xexp_transform_fn(q_arr, return_weight=False):
+    def action_norm_xexp_transform_fn(q_arr, return_weight=False, other_net_qval=None):
+        if other_net_qval is None:
+            q_new = (q_arr/(const_val + 1e-9))
+        else:
+            q_new = (other_net_qval/(const_val + 1e-9))
+        weight = F.softmax(q_new, dim=-1)
+        weight = weight.detach()
+
+        if return_weight:
+            return weight
+        return  q_arr * weight
+
+    def norm_neg_xexp_transform_fn(q_arr, return_weight=False, other_net_qval=None):
         batch_size = q_arr.shape[0]
         q_new = -(q_arr/(const_val + 1e-9))
         q_new = q_new - q_new.max()
@@ -798,16 +871,16 @@ def get_fg(transform_type, const_val):
             return weight
         return  q_arr * weight* batch_size
 
-    def neg_exp_transform_fn(q_arr):
+    def neg_exp_transform_fn(q_arr, return_weight=False, other_net_qval=None):
         return const_val * -1 * torch.exp(-1*q_arr/ (const_val + 1e-9)) 
 
-    def log_transform_fun(q_arr):
+    def log_transform_fun(q_arr, return_weight=False, other_net_qval=None):
         return const_val * torch.log(q_arr/ (const_val + 1e-9)) 
 
-    def sig_transform_fun(q_arr):
+    def sig_transform_fun(q_arr, return_weight=False, other_net_qval=None):
         return const_val * torch.sigmoid(q_arr/ (const_val + 1e-9)) 
 
-    def identity(q_arr):
+    def identity(q_arr, return_weight=False, other_net_qval=None):
         return q_arr
 
     f,g = identity, identity
@@ -843,54 +916,102 @@ def get_fg(transform_type, const_val):
             f = g = tanh_transform_fn
         elif transform_type == 12:
             f = g = exp_transform_fn
+        elif transform_type == 13:
+            f = identity
+            g = action_norm_xexp_transform_fn
         else:
             assert False
     return f,g
 
-def project_qvalues_cql(q_values, network, optimizer, num_steps=50, cql_alpha=0.1, weights=None, transform_type=0, const_transform=2):
+def project_qvalues_cql(q_values, network, optimizer, num_steps=50, cql_alpha=0.1, weights=None, transform_type=0, const_transform=2, other_network=loaded_net_full, return_loss=False):
     # regress onto q_values (aka projection)
     q_values_tensor = torch.tensor(q_values, dtype=torch.float32)
     for _ in range(num_steps):
         pred_qvalues = network(torch.arange(q_values.shape[0]))
+        if other_network is not None:
+            other_net_qval = other_network(torch.arange(q_values.shape[0]))
+        else:
+            other_net_qval = None
+
         if weights is None:
             loss = torch.mean((pred_qvalues - q_values_tensor)**2)
         else:
             loss = torch.mean(weights*(pred_qvalues - q_values_tensor)**2)
+
+        td_loss = loss
 
         # Add cql_loss
         # You can have two variants of this loss, one where data q-values
         # also maximized (CQL-v2), and one where only the large Q-values 
         # are pushed down (CQL-v1) as covered in the tutorial
         f,g = get_fg(transform_type, const_transform)
-        cql_loss = torch.logsumexp(f(pred_qvalues), dim=-1, keepdim=True) - g(pred_qvalues)
+        if other_network is not None:
+            cql_loss = torch.logsumexp(f(pred_qvalues,other_net_qval=other_net_qval), dim=-1, keepdim=True) - g(pred_qvalues,other_net_qval=other_net_qval)
+        else:
+            cql_loss = torch.logsumexp(f(pred_qvalues), dim=-1, keepdim=True) - g(pred_qvalues)
+
+        orig_cql_loss = torch.logsumexp(pred_qvalues, dim=-1, keepdim=True) - pred_qvalues
         loss = loss + cql_alpha * torch.mean(weights * cql_loss)
         network.zero_grad()
         loss.backward()
         optimizer.step()
+
+        loss_statistics = dict(
+            full_loss=loss.item(),
+            td_loss=td_loss.item(),
+            cql_loss=cql_loss.mean().item(),
+            orig_cql_loss=orig_cql_loss.mean().item(),
+        )
+
+    if return_loss:
+        return pred_qvalues.detach().numpy(), loss_statistics
     return pred_qvalues.detach().numpy()
 
-def project_qvalues_cql_sampled(env, s, a, target_values, network, optimizer, cql_alpha=0.1, num_steps=50, weights=None, transform_type=0, const_transform=2):
+def project_qvalues_cql_sampled(env, s, a, target_values, network, optimizer, cql_alpha=0.1, num_steps=50, weights=None, transform_type=0, const_transform=2, other_network=loaded_net_limited, return_loss=False):
     # train with a sampled dataset
     target_qvalues = torch.tensor(target_values, dtype=torch.float32)
     s = torch.tensor(s, dtype=torch.int64)
     a = torch.tensor(a, dtype=torch.int64)    
     pred_qvalues = network(s)
+    if other_network is not None:
+        other_net_qval = other_network(s)
+    else:
+        other_net_qval = None
 
     f,g = get_fg(transform_type, const_transform)
-
-    logsumexp_qvalues = torch.logsumexp(f(pred_qvalues), dim=-1)
+    if other_network is not None:
+        logsumexp_qvalues = torch.logsumexp(f(pred_qvalues, other_net_qval=other_net_qval), dim=-1)
+    else:
+        logsumexp_qvalues = torch.logsumexp(f(pred_qvalues), dim=-1)
 
     pred_qvalues = pred_qvalues.gather(1, a.reshape(-1,1)).squeeze()
-    cql_loss = logsumexp_qvalues - g(pred_qvalues)
+    
+    if other_network is not None:
+        cql_loss = logsumexp_qvalues - g(pred_qvalues, other_net_qval=other_net_qval)
+    else:
+        cql_loss = logsumexp_qvalues - g(pred_qvalues)
 
-    loss = torch.mean((pred_qvalues - target_qvalues)**2)
+    orig_cql_loss = torch.logsumexp(pred_qvalues, dim=-1) - pred_qvalues
+
+    td_loss = loss = torch.mean((pred_qvalues - target_qvalues)**2)
+
     loss = loss + cql_alpha * torch.mean(cql_loss)
+
+    loss_statistics = dict(
+        full_loss=loss.item(),
+        td_loss=td_loss.item(),
+        cql_loss=cql_loss.mean().item(),
+        orig_cql_loss=orig_cql_loss.mean().item(),
+    )
 
     network.zero_grad()
     loss.backward()
     optimizer.step()
 
     pred_qvalues = network(torch.arange(env.num_states))
+
+    if return_loss:
+        return pred_qvalues.detach().numpy(), loss_statistics
     return pred_qvalues.detach().numpy()
 
 def conservative_q_iteration(
@@ -930,29 +1051,44 @@ def conservative_q_iteration(
         weights_tensor = torch.tensor(weights, dtype=torch.float32)
 
     q_values = np.zeros((dS, dA))
+    
+    if loaded_q_values is not None and not args.loadnoinit:
+        q_values = loaded_q_values
+
     kls, evals = [],[]
     qmax, qmin, qavg, qstd = [], [],[], []
+    losses = defaultdict(list)
     for i in range(num_itrs):
+        cond = args.hotstart and i < args.hotstart_it
+
         if sampled:
             for j in range(project_steps):
                 training_idx = np.random.choice(np.arange(len(training_dataset)), size=128)
                 s, a, ns, r = get_tensors(training_dataset, training_idx)
                 target_values = q_backup_sparse_sampled(env, q_values, s, a, ns, r, **kwargs)
-                intermed_values = project_qvalues_cql_sampled(
-                                env, s, a, target_values, network, optimizer, 
-                                cql_alpha=cql_alpha, weights=None, 
-                                transform_type=transform_type, const_transform=const_transform
-                )
+                
+                intermed_values, loss_statistics = project_qvalues_cql_sampled(
+                    env, s, a, target_values, network, optimizer, 
+                    cql_alpha=cql_alpha, weights=None, 
+                    transform_type=0 if cond else transform_type, 
+                    const_transform=const_transform,return_loss=True)
                 if j == project_steps - 1:
                     q_values = intermed_values
         else:
             target_values = q_backup_sparse(env, q_values, **kwargs)
-            q_values = project_qvalues_cql(target_values, network, optimizer,weights=weights_tensor, cql_alpha=cql_alpha, num_steps=project_steps, transform_type=transform_type, const_transform=const_transform)
+            q_values, loss_statistics = project_qvalues_cql(
+                target_values, network, optimizer,weights=weights_tensor, 
+                cql_alpha=cql_alpha, num_steps=project_steps, 
+                transform_type=0 if cond else transform_type, 
+                const_transform=const_transform, return_loss=True)
         
         qmax.append(q_values.max())
         qmin.append(q_values.min())
         qavg.append(q_values.mean())
         qstd.append(q_values.std())
+
+        for l in loss_statistics:
+            losses[l].append(loss_statistics[l])
 
         if render:
             plot_sa_values(env, q_values, update=True, title='Q-values Iteration ' + str(i).zfill(3), prefix=prefix)
@@ -973,6 +1109,7 @@ def conservative_q_iteration(
     to_log={full_name: plot}
     to_log.update(custom_log)
     wandb.log(to_log, step=0)
+    plt.close(fig)
 
     fig = plt.figure()
     plt.plot(evals)
@@ -984,6 +1121,7 @@ def conservative_q_iteration(
     to_log={full_name: plot}
     to_log.update(custom_log)
     wandb.log(to_log, step=0)
+    plt.close(fig)
 
     fig = plt.figure()
     plt.plot(qavg)
@@ -995,6 +1133,7 @@ def conservative_q_iteration(
     to_log={full_name: plot}
     to_log.update(custom_log)
     wandb.log(to_log, step=0)
+    plt.close(fig)
 
     fig = plt.figure()
     plt.plot(qmax)
@@ -1006,6 +1145,7 @@ def conservative_q_iteration(
     to_log={full_name: plot}
     to_log.update(custom_log)
     wandb.log(to_log, step=0)
+    plt.close(fig)
 
     fig = plt.figure()
     plt.plot(qmin)
@@ -1017,7 +1157,8 @@ def conservative_q_iteration(
     to_log={full_name: plot}
     to_log.update(custom_log)
     wandb.log(to_log, step=0)
-    
+    plt.close(fig)
+
     fig = plt.figure()
     plt.plot(qstd)
     title = 'Q Prediction Std'
@@ -1028,7 +1169,20 @@ def conservative_q_iteration(
     to_log={full_name: plot}
     to_log.update(custom_log)
     wandb.log(to_log, step=0)
+    plt.close(fig)
 
+    for l in losses:
+        fig = plt.figure()
+        plt.plot(losses[l])
+        title = 'Loss ' + l
+        plt.title(title)
+
+        plot = wandb.Image(fig)
+        full_name = prefix + title
+        to_log={full_name: plot}
+        to_log.update(custom_log)
+        wandb.log(to_log, step=0)
+        plt.close(fig)
     plot_sa_values(env, q_values, update=True, title='Final Q values', prefix=prefix)
 
     return q_values
@@ -1081,10 +1235,10 @@ elif maze_type == 1:
     )
 elif maze_type == 2:
     maze_str = (
-        "SOOOLLLLOOOOLLLLOOOOLLLL\\"+
-        "OOOOLOOOOOOOLOOOOOOOLOOO\\"+
-        "OOOOOOLOOOOOOOLOOOOOOOLO\\"+
-        "OOOOLLLOOOOOLLLOOOOOLLLR\\"
+        "SOOO####OOOO####\\"+
+        "OOOO#OOOOOOO#OOO\\"+
+        "OOOOOO#OOOOOOO#O\\"+
+        "OOOO###OOOOO###R\\"
     )
     valid_fn = valid_fn_staged 
 elif maze_type == 3:
@@ -1164,6 +1318,10 @@ elif maze_type in list(range(4,6)):
 else:
     num_itrs=200
     discount=0.99
+
+if args.hotstart and args.hotstart_it == 0:
+    args.hotstart_it = num_itrs//2 # half of the iterations
+
 print('iters', num_itrs)
 print('discount', discount)
     
@@ -1290,6 +1448,9 @@ In this experiment, we will experiment with the conservative Q-learning (CQL) al
 network = FCNetwork(env, layers=[20, 20])
 #network = TabularNetwork(env)
 
+if loaded_net_full is not None and not args.loadnoinit:
+    network.load_state_dict(loaded_net_full.state_dict())
+
 
 cql_alpha_val = args.cql_alpha_val # @param {type:"slider", min:0.0, max:10.0, step:0.1}
 transform_type = args.transform_type # @param
@@ -1297,6 +1458,9 @@ const_transform = args.const_transform # @param
 
 # Run Q-iteration
 q_values = conservative_q_iteration(env, network, num_itrs=num_itrs, discount=discount, cql_alpha=cql_alpha_val, weights=weights, render=args.render, transform_type=transform_type, const_transform=const_transform, prefix='FullCQL/', optimal_policy=optimal_policy)
+
+q_value_path = os.path.join(savepath, 'q_values.npy')
+np.save(q_value_path, q_values)
 
 # Compute and plot the value function
 v_values = np.max(q_values, axis=1)
@@ -1329,6 +1493,9 @@ policy_sa_visitations = compute_visitation(env, policy, T=num_itrs)
 plot_sa_values(env, policy_sa_visitations, title='Q-hat_CQL Visitation', prefix='FullCQL/')
 compute_return(env, policy, T=num_itrs)
 
+# save network
+torch.save(network, os.path.join(savepath, 'net_full.pt'))
+
 """### Experiment 3: Offline RL with Distributional Shift + Finite Samples
 
 In this expeirment, we will see how finite sampling error affects the performance of offline RL alongside distributional shift. In addition to a distribution over state-action pairs, we will not be able to compute the exact target value for the Bellman backup since we only observe one (or few) next-state samples given a state-actio pair. Repeat experiments 1 and 2 in this setup with varying number of datapoints in the dataset.
@@ -1346,6 +1513,9 @@ In particular, answer the following questions:
 # Use a tabular or feedforward NN approximator
 network = FCNetwork(env, layers=[20, 20])
 #network = TabularNetwork(env)
+
+if loaded_net_limited is not None and not args.loadnoinit:
+    network.load_state_dict(loaded_net_limited.state_dict())
 
 cql_alpha_val = args.cql_alpha_val # @param {type:"slider", min:0.0, max:10.0, step:0.01}
 transform_type = args.transform_type # @param
@@ -1385,3 +1555,5 @@ policy = compute_policy_deterministic(q_values, eps_greedy=0.1)
 policy_sa_visitations = compute_visitation(env, policy, T=num_itrs)
 plot_sa_values(env, policy_sa_visitations, title='Q-hat_CQL Visitation', prefix='finiteCQL/')
 
+# save network
+torch.save(network, os.path.join(savepath, 'net_limited.pt'))
