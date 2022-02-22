@@ -849,6 +849,7 @@ def get_fg(transform_type, const_val):
         return  q_arr * weight * batch_size
 
     def action_norm_xexp_transform_fn(q_arr, return_weight=False, other_net_qval=None):
+        batch_size = q_arr.shape[0]
         if other_net_qval is None:
             q_new = (q_arr/(const_val + 1e-9))
         else:
@@ -858,6 +859,8 @@ def get_fg(transform_type, const_val):
 
         if return_weight:
             return weight
+
+        weight = weight/weight.sum(dim=1, keepdim=True) * batch_size # normalize to sum to batch size (sxa in the case of the gridworld env)
         return  q_arr * weight
 
     def norm_neg_xexp_transform_fn(q_arr, return_weight=False, other_net_qval=None):
@@ -869,6 +872,7 @@ def get_fg(transform_type, const_val):
 
         if return_weight:
             return weight
+
         return  q_arr * weight* batch_size
 
     def neg_exp_transform_fn(q_arr, return_weight=False, other_net_qval=None):
@@ -947,8 +951,12 @@ def project_qvalues_cql(q_values, network, optimizer, num_steps=50, cql_alpha=0.
         f,g = get_fg(transform_type, const_transform)
         if other_network is not None:
             cql_loss = torch.logsumexp(f(pred_qvalues,other_net_qval=other_net_qval), dim=-1, keepdim=True) - g(pred_qvalues,other_net_qval=other_net_qval)
+            weight_cql = g(pred_qvalues, other_net_qval=other_net_qval, return_weight=True)
         else:
             cql_loss = torch.logsumexp(f(pred_qvalues), dim=-1, keepdim=True) - g(pred_qvalues)
+            weight_cql = g(pred_qvalues, return_weight=True)
+        
+        weight_entropy_cql = (weight_cql * torch.log(weight_cql + 1e-9)).sum(dim=1).mean()
 
         orig_cql_loss = torch.logsumexp(pred_qvalues, dim=-1, keepdim=True) - pred_qvalues
         loss = loss + cql_alpha * torch.mean(weights * cql_loss)
@@ -961,6 +969,8 @@ def project_qvalues_cql(q_values, network, optimizer, num_steps=50, cql_alpha=0.
             td_loss=td_loss.item(),
             cql_loss=cql_loss.mean().item(),
             orig_cql_loss=orig_cql_loss.mean().item(),
+            weight_entropy_cql=weight_entropy_cql.item(),
+            full_weight=weight_cql.cpu().numpy(), # remember to handle this
         )
 
     if return_loss:
@@ -988,9 +998,12 @@ def project_qvalues_cql_sampled(env, s, a, target_values, network, optimizer, cq
     
     if other_network is not None:
         cql_loss = logsumexp_qvalues - g(pred_qvalues, other_net_qval=other_net_qval)
+        weight_cql = g(pred_qvalues, other_net_qval=other_net_qval, return_weight=True)
     else:
         cql_loss = logsumexp_qvalues - g(pred_qvalues)
+        weight_cql = g(pred_qvalues, return_weight=True)
 
+    weight_entropy_cql = (weight_cql * torch.log(weight_cql + 1e-9)).sum(dim=1).mean()
     orig_cql_loss = torch.logsumexp(pred_qvalues, dim=-1) - pred_qvalues
 
     td_loss = loss = torch.mean((pred_qvalues - target_qvalues)**2)
@@ -1002,6 +1015,8 @@ def project_qvalues_cql_sampled(env, s, a, target_values, network, optimizer, cq
         td_loss=td_loss.item(),
         cql_loss=cql_loss.mean().item(),
         orig_cql_loss=orig_cql_loss.mean().item(),
+        weight_entropy_cql=weight_entropy_cql.item(),
+        full_weight=weight_cql.cpu().numpy(), # remember to handle this
     )
 
     network.zero_grad()
@@ -1172,17 +1187,28 @@ def conservative_q_iteration(
     plt.close(fig)
 
     for l in losses:
-        fig = plt.figure()
-        plt.plot(losses[l])
-        title = 'Loss ' + l
-        plt.title(title)
+        if l == 'full_weight':
+            for i in range(len(losses[l])):
+                weights_cql = losses[l][i]
+                if weights_cql is None:
+                    weights_cql = np.ones_like(q_values)/q_values.shape[1] # uniform weights
+                if i % 10 == 0:
+                    plot_sa_values(env, weights_cql, update=True, title='CQL Upweight Term Weights/Iteration ' + str(i).zfill(3), prefix=prefix)
+                if i == len(losses[l]) - 1:
+                    plot_sa_values(env, weights_cql, update=True, title='Final CQL Upweight Term Weights', prefix=prefix)
+        else:
+            fig = plt.figure()
+            plt.plot(losses[l])
+            title = l
+            plt.title(title)
 
-        plot = wandb.Image(fig)
-        full_name = prefix + title
-        to_log={full_name: plot}
-        to_log.update(custom_log)
-        wandb.log(to_log, step=0)
-        plt.close(fig)
+            plot = wandb.Image(fig)
+            full_name = prefix + title
+            to_log={full_name: plot}
+            to_log.update(custom_log)
+            wandb.log(to_log, step=0)
+            plt.close(fig)
+
     plot_sa_values(env, q_values, update=True, title='Final Q values', prefix=prefix)
 
     return q_values

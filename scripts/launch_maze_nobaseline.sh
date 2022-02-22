@@ -1,4 +1,4 @@
-MAZE_TYPE=4;
+MAZE_TYPE=3;
 ENV_TYPE=smooth;
 DES_TYPE=13;
 
