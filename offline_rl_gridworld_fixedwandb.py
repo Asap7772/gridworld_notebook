@@ -1,5 +1,6 @@
 import argparse
 from collections import defaultdict
+from copy import copy
 from distutils.command.config import config
 from foo import Nop
 import numpy as np
@@ -22,12 +23,13 @@ parser.add_argument('--render', action='store_true')
 parser.add_argument('--nowandb', action='store_true')
 
 parser.add_argument('--savepath', type=str, default='/nfs/kun1/users/asap7772/algo_gridworld/data/')
+
 parser.add_argument('--hotstart', action='store_true')
+parser.add_argument('--hotstart_weight', action='store_true')
 parser.add_argument('--hotstart_it', type=int, default=0)
-parser.add_argument('--othernet', action='store_true') 
-parser.add_argument('--load_network', type=str, default='')
-parser.add_argument('--loadnoinit', action='store_true')
-parser.add_argument('--hidden_size', type=int, default=256)
+
+parser.add_argument('--num_itrs', type=int, default=1000)
+parser.add_argument('--hidden_size', type=int, default=128)
 
 #@title Neural Network Code
 
@@ -86,30 +88,9 @@ args = parser.parse_args()
 all_args = vars(args)
 name = '{}_maze{}_dataset{}_size{}_env{}_minq{}_ttype{}_const{}'.format(args.exp_start, args.maze_type, args.dataset_composition, args.dataset_size, args.env_type, args.cql_alpha_val, args.transform_type, args.const_transform)
 
-if args.hotstart:
+if args.hotstart or args.hotstart_weight:
     print('hotstart')
-    name = '{}_hotstart{}'.format(name, args.hotstart_it)
-    if args.othernet:
-        name = '{}_othernet'.format(name)
-
-if args.load_network != '':
-    print('loading networks + qvalues')
-    name = '{}_load'.format(name)
-
-    if args.loadnoinit:
-        name = '{}_noinit'.format(name)
-
-    folder_path = args.load_network
-    q_values_path = '{}/q_values.npy'.format(folder_path)
-    net_full_path = '{}/net_full.pt'.format(folder_path)
-    net_limited_path = '{}/net_limited.pt'.format(folder_path)
-
-    loaded_q_values = np.load(q_values_path)
-    loaded_net_full = torch.load(net_full_path)
-    loaded_net_limited = torch.load(net_limited_path)
-else:
-    loaded_q_values = loaded_net_full = loaded_net_limited = None
-
+    name = '{}_hotstart{}'.format(name, args.hotstart_it) if args.hotstart else '{}_hotstart_weight{}'.format(name, args.hotstart_it)
 
 import os
 savepath = os.path.join(args.savepath + name)
@@ -496,7 +477,7 @@ ACT_OFFSETS = [
 
 PLOT_CMAP = cm.RdYlBu
 
-def plot_sa_values(env, q_values, text_values=True,invert_y=True, update=False, title=None, prefix=None, custom_log={}):
+def plot_sa_values(env, q_values, text_values=True,invert_y=True, update=False, title=None, prefix=None, custom_log={}, step=0):
     w = env.gs.width
     h = env.gs.height
 
@@ -534,11 +515,11 @@ def plot_sa_values(env, q_values, text_values=True,invert_y=True, update=False, 
     full_name = prefix + title
     to_log={full_name: plot}
     to_log.update(custom_log)
-    wandb.log(to_log, step=0)
+    wandb.log(to_log, step=step)
 
     plt.close()
 
-def plot_s_values(env, v_values, text_values=True, invert_y=True, update=False,title=None, prefix=None, custom_log={}):
+def plot_s_values(env, v_values, text_values=True, invert_y=True, update=False,title=None, prefix=None, custom_log={}, step=0):
     w = env.gs.width
     h = env.gs.height
     if update:
@@ -571,7 +552,7 @@ def plot_s_values(env, v_values, text_values=True, invert_y=True, update=False,t
     full_name = prefix + title
     to_log={full_name: plot}
     to_log.update(custom_log)
-    wandb.log(to_log, step=0)
+    wandb.log(to_log, step=step)
     
     plt.close()
 
@@ -928,7 +909,7 @@ def get_fg(transform_type, const_val):
             assert False
     return f,g
 
-def project_qvalues_cql(q_values, network, optimizer, num_steps=50, cql_alpha=0.1, weights=None, transform_type=0, const_transform=2, other_network=loaded_net_full, return_loss=False):
+def project_qvalues_cql(q_values, network, optimizer, num_steps=50, cql_alpha=0.1, weights=None, transform_type=0, const_transform=2, other_network=None, return_loss=False):
     # regress onto q_values (aka projection)
     q_values_tensor = torch.tensor(q_values, dtype=torch.float32)
     for _ in range(num_steps):
@@ -978,7 +959,7 @@ def project_qvalues_cql(q_values, network, optimizer, num_steps=50, cql_alpha=0.
         return pred_qvalues.detach().numpy(), loss_statistics
     return pred_qvalues.detach().numpy()
 
-def project_qvalues_cql_sampled(env, s, a, target_values, network, optimizer, cql_alpha=0.1, num_steps=50, weights=None, transform_type=0, const_transform=2, other_network=loaded_net_limited, return_loss=False):
+def project_qvalues_cql_sampled(env, s, a, target_values, network, optimizer, cql_alpha=0.1, num_steps=50, weights=None, transform_type=0, const_transform=2, other_network=None, return_loss=False):
     # train with a sampled dataset
     target_qvalues = torch.tensor(target_values, dtype=torch.float32)
     s = torch.tensor(s, dtype=torch.int64)
@@ -1065,17 +1046,41 @@ def conservative_q_iteration(
     weights_tensor = None
     if weights is not None:
         weights_tensor = torch.tensor(weights, dtype=torch.float32)
-
     q_values = np.zeros((dS, dA))
     
-    if loaded_q_values is not None and not args.loadnoinit:
-        q_values = loaded_q_values
+    import copy
+    other_network = copy.deepcopy(network) if args.hotstart_weight else None
+    other_q_values = np.zeros((dS, dA))
 
     kls, evals = [],[]
     qmax, qmin, qavg, qstd = [], [],[], []
     losses = defaultdict(list)
     for i in range(num_itrs):
         cond = args.hotstart and i < args.hotstart_it
+        cond_weight = args.hotstart_weight and i < args.hotstart_it
+        
+        assert not(cond and cond_weight), "Either hotstart or hotstart_weight must be false"
+
+        if cond_weight:
+            # hotstart with weights
+            if sampled:
+                for j in range(project_steps):
+                    training_idx = np.random.choice(np.arange(len(training_dataset)), size=128)
+                    s, a, ns, r = get_tensors(training_dataset, training_idx)
+                    target_values = q_backup_sparse_sampled(env, other_q_values, s, a, ns, r, **kwargs)
+                    
+                    intermed_values, loss_statistics = project_qvalues_cql_sampled(
+                        env, s, a, target_values, other_network, optimizer, 
+                        cql_alpha=cql_alpha, weights=None, 
+                        transform_type=0, const_transform=const_transform,return_loss=True)
+                    if j == project_steps - 1:
+                        other_q_values = intermed_values
+            else:
+                target_values = q_backup_sparse(env, other_q_values, **kwargs)
+                other_q_values, loss_statistics = project_qvalues_cql(
+                    target_values, other_network, optimizer,weights=weights_tensor, 
+                    cql_alpha=cql_alpha, num_steps=project_steps, 
+                    transform_type=0, const_transform=const_transform, return_loss=True)
 
         if sampled:
             for j in range(project_steps):
@@ -1087,7 +1092,8 @@ def conservative_q_iteration(
                     env, s, a, target_values, network, optimizer, 
                     cql_alpha=cql_alpha, weights=None, 
                     transform_type=0 if cond else transform_type, 
-                    const_transform=const_transform,return_loss=True)
+                    const_transform=const_transform,return_loss=True, 
+                    other_network=other_network)
                 if j == project_steps - 1:
                     q_values = intermed_values
         else:
@@ -1096,7 +1102,8 @@ def conservative_q_iteration(
                 target_values, network, optimizer,weights=weights_tensor, 
                 cql_alpha=cql_alpha, num_steps=project_steps, 
                 transform_type=0 if cond else transform_type, 
-                const_transform=const_transform, return_loss=True)
+                const_transform=const_transform, return_loss=True,
+                other_network=other_network)
         
         qmax.append(q_values.max())
         qmin.append(q_values.min())
@@ -1114,103 +1121,33 @@ def conservative_q_iteration(
         policy = compute_policy_deterministic(q_values, eps_greedy=0.1)
         ret = compute_return(env,policy, T=num_itrs)
         evals.append(ret)
+
+    # log weights
+    l = 'full_weight'
+    for i in range(len(losses[l])):
+        weights_cql = losses[l][i]
+        if weights_cql is None:
+            weights_cql = np.ones_like(q_values)/q_values.shape[1] # uniform weights
+        if i == len(losses[l]) - 1:
+            plot_sa_values(env, weights_cql, update=True, title='Final CQL Upweight Term Weights', prefix=prefix)
+    losses.pop(l)
     
-    fig = plt.figure()
-    plt.plot(kls)
-    title = 'KL Divergence from Optimal Policy'
-    plt.title(title)
-
-    plot = wandb.Image(fig)
-    full_name = prefix + title
-    to_log={full_name: plot}
-    to_log.update(custom_log)
-    wandb.log(to_log, step=0)
-    plt.close(fig)
-
-    fig = plt.figure()
-    plt.plot(evals)
-    title = 'Return of Trained Policy'
-    plt.title(title)
-
-    plot = wandb.Image(fig)
-    full_name = prefix + title
-    to_log={full_name: plot}
-    to_log.update(custom_log)
-    wandb.log(to_log, step=0)
-    plt.close(fig)
-
-    fig = plt.figure()
-    plt.plot(qavg)
-    title = 'Q Prediction Mean'
-    plt.title(title)
-
-    plot = wandb.Image(fig)
-    full_name = prefix + title
-    to_log={full_name: plot}
-    to_log.update(custom_log)
-    wandb.log(to_log, step=0)
-    plt.close(fig)
-
-    fig = plt.figure()
-    plt.plot(qmax)
-    title = 'Q Prediction Max'
-    plt.title(title)
-
-    plot = wandb.Image(fig)
-    full_name = prefix + title
-    to_log={full_name: plot}
-    to_log.update(custom_log)
-    wandb.log(to_log, step=0)
-    plt.close(fig)
-
-    fig = plt.figure()
-    plt.plot(qmin)
-    title = 'Q Prediction Min'
-    plt.title(title)
-
-    plot = wandb.Image(fig)
-    full_name = prefix + title
-    to_log={full_name: plot}
-    to_log.update(custom_log)
-    wandb.log(to_log, step=0)
-    plt.close(fig)
-
-    fig = plt.figure()
-    plt.plot(qstd)
-    title = 'Q Prediction Std'
-    plt.title(title)
-
-    plot = wandb.Image(fig)
-    full_name = prefix + title
-    to_log={full_name: plot}
-    to_log.update(custom_log)
-    wandb.log(to_log, step=0)
-    plt.close(fig)
-
-    for l in losses:
-        if l == 'full_weight':
-            for i in range(len(losses[l])):
-                weights_cql = losses[l][i]
-                if weights_cql is None:
-                    weights_cql = np.ones_like(q_values)/q_values.shape[1] # uniform weights
-                if i % 10 == 0:
-                    plot_sa_values(env, weights_cql, update=True, title='CQL Upweight Term Weights/Iteration ' + str(i).zfill(3), prefix=prefix)
-                if i == len(losses[l]) - 1:
-                    plot_sa_values(env, weights_cql, update=True, title='Final CQL Upweight Term Weights', prefix=prefix)
-        else:
-            fig = plt.figure()
-            plt.plot(losses[l])
-            title = l
-            plt.title(title)
-
-            plot = wandb.Image(fig)
-            full_name = prefix + title
-            to_log={full_name: plot}
-            to_log.update(custom_log)
-            wandb.log(to_log, step=0)
-            plt.close(fig)
-
     plot_sa_values(env, q_values, update=True, title='Final Q values', prefix=prefix)
+    
+    things_to_log = {
+        'Q Prediction Max': qmax,
+        'Q Prediction Min': qmin,
+        'Q Prediction Mean': qavg,
+        'Q Prediction Std': qstd,
+        'Return of Trained Policy': evals,
+        'KL Divergence from Optimal Policy': kls,
+    }
+    things_to_log.update(losses)
+    things_to_log = {k: np.array(v).tolist() for k, v in things_to_log.items()}
+    things_to_log = [dict(zip(things_to_log,t)) for t in zip(*things_to_log.values())]
+
+    for i in range(len(things_to_log)):
+       wandb.log(things_to_log[i], step=i)
 
     return q_values
 
@@ -1334,16 +1271,16 @@ else:
     assert False
 
 if maze_type in list(range(0,2)):
-    num_itrs=1000
+    num_itrs=args.num_itrs
     discount=0.95
 elif maze_type in list(range(2,4)):
-    num_itrs=1000
+    num_itrs=args.num_itrs
     discount=0.96
 elif maze_type in list(range(4,6)):    
-    num_itrs=1000
+    num_itrs=args.num_itrs
     discount=0.98
 else:
-    num_itrs=1000
+    num_itrs=args.num_itrs
     discount=0.99
 
 if args.hotstart and args.hotstart_it == 0:
@@ -1475,9 +1412,6 @@ In this experiment, we will experiment with the conservative Q-learning (CQL) al
 network = FCNetwork(env, layers=[args.hidden_size, args.hidden_size])
 #network = TabularNetwork(env)
 
-if loaded_net_full is not None and not args.loadnoinit:
-    network.load_state_dict(loaded_net_full.state_dict())
-
 
 cql_alpha_val = args.cql_alpha_val # @param {type:"slider", min:0.0, max:10.0, step:0.1}
 transform_type = args.transform_type # @param
@@ -1491,7 +1425,7 @@ np.save(q_value_path, q_values)
 
 # Compute and plot the value function
 v_values = np.max(q_values, axis=1)
-plot_s_values(env, v_values, title='Values', prefix='FullCQL/')
+plot_s_values(env, v_values, title='Values', prefix='FullCQL/',step=num_itrs)
 
 #@title Plot Q-functions, overestimation error
 
@@ -1512,75 +1446,72 @@ print ('Total Overestimation under the learned policy: ', total_policy_overestim
 total_overestimation_unweighted = np.mean((q_values - optimal_qvalues))
 print ('Total Overestimation: ', total_overestimation_unweighted)
 
-plot_sa_values(env, (q_values - optimal_qvalues), title='Q-function Error (Q - Q*)', prefix='FullCQL/')
+plot_sa_values(env, (q_values - optimal_qvalues), title='Q-function Error (Q - Q*)', prefix='FullCQL/',step=num_itrs)
 
 #@title Compute visitations of the learned policy
 policy = compute_policy_deterministic(q_values, eps_greedy=0.1)
 policy_sa_visitations = compute_visitation(env, policy, T=num_itrs)
-plot_sa_values(env, policy_sa_visitations, title='Q-hat_CQL Visitation', prefix='FullCQL/')
+plot_sa_values(env, policy_sa_visitations, title='Q-hat_CQL Visitation', prefix='FullCQL/',step=num_itrs)
 compute_return(env, policy, T=num_itrs)
 
 # save network
 torch.save(network, os.path.join(savepath, 'net_full.pt'))
 
-"""### Experiment 3: Offline RL with Distributional Shift + Finite Samples
+# """### Experiment 3: Offline RL with Distributional Shift + Finite Samples
 
-In this expeirment, we will see how finite sampling error affects the performance of offline RL alongside distributional shift. In addition to a distribution over state-action pairs, we will not be able to compute the exact target value for the Bellman backup since we only observe one (or few) next-state samples given a state-actio pair. Repeat experiments 1 and 2 in this setup with varying number of datapoints in the dataset.
-In particular, answer the following questions:
+# In this expeirment, we will see how finite sampling error affects the performance of offline RL alongside distributional shift. In addition to a distribution over state-action pairs, we will not be able to compute the exact target value for the Bellman backup since we only observe one (or few) next-state samples given a state-actio pair. Repeat experiments 1 and 2 in this setup with varying number of datapoints in the dataset.
+# In particular, answer the following questions:
 
-- How does the amount of finite data affect the performance of offline RL algorithms that do and do not correct for distributional shift? (Try running FQI and CQL with weighting schemes from before, but with sampling, i.e., uncheck `weighting_only` for this part, and note that sensitivity to dataset size is higher with narrow data-distributions.) With large amounts of data, you should find that the performance of FQI and CQL are similar to Experiments 1 and 2 repsectively.
+# - How does the amount of finite data affect the performance of offline RL algorithms that do and do not correct for distributional shift? (Try running FQI and CQL with weighting schemes from before, but with sampling, i.e., uncheck `weighting_only` for this part, and note that sensitivity to dataset size is higher with narrow data-distributions.) With large amounts of data, you should find that the performance of FQI and CQL are similar to Experiments 1 and 2 repsectively.
 
-- Train for varying amounts of steps with the CQL regularizer in the setting when the size of the dataset (controlled by setting ``dataset_size``) is small (e.g., <= 50). You will mostly find that the performance starts degrading once trained for long enough especially with small-medium sized datasets. This was discussed in the OPE section of the tutorial and neccessitates the development of effective policy selection strategies. While we did not implement OPE in this colab, implementing a method for policy selection such as fitted Q-evaluation (FQE) should be straightforward and it would be an interesting exercise to see if it can find out the best policy of all policy iterates found by CQL.
+# - Train for varying amounts of steps with the CQL regularizer in the setting when the size of the dataset (controlled by setting ``dataset_size``) is small (e.g., <= 50). You will mostly find that the performance starts degrading once trained for long enough especially with small-medium sized datasets. This was discussed in the OPE section of the tutorial and neccessitates the development of effective policy selection strategies. While we did not implement OPE in this colab, implementing a method for policy selection such as fitted Q-evaluation (FQE) should be straightforward and it would be an interesting exercise to see if it can find out the best policy of all policy iterates found by CQL.
 
-#### Experiment 1 with Finite Data
-"""
+# #### Experiment 1 with Finite Data
+# """
 
-#@title Run conservative Q-iteration (or CQL) with finite data
+# #@title Run conservative Q-iteration (or CQL) with finite data
 
-# Use a tabular or feedforward NN approximator
-network = FCNetwork(env, layers=[args.hidden_size, args.hidden_size])
-#network = TabularNetwork(env)
+# # Use a tabular or feedforward NN approximator
+# network = FCNetwork(env, layers=[args.hidden_size, args.hidden_size])
+# #network = TabularNetwork(env)
 
-if loaded_net_limited is not None and not args.loadnoinit:
-    network.load_state_dict(loaded_net_limited.state_dict())
+# cql_alpha_val = args.cql_alpha_val # @param {type:"slider", min:0.0, max:10.0, step:0.01}
+# transform_type = args.transform_type # @param
+# const_transform = args.const_transform # @param
 
-cql_alpha_val = args.cql_alpha_val # @param {type:"slider", min:0.0, max:10.0, step:0.01}
-transform_type = args.transform_type # @param
-const_transform = args.const_transform # @param
+# print (weighting_only)
+# # Run Q-iteration
+# q_values = conservative_q_iteration(env, network, num_itrs=num_itrs, discount=discount, cql_alpha=cql_alpha_val, weights=weights, render=args.render, sampled=not(weighting_only), training_dataset=training_dataset, transform_type=transform_type, const_transform=const_transform, prefix='finiteCQL/', optimal_policy=optimal_policy)
 
-print (weighting_only)
-# Run Q-iteration
-q_values = conservative_q_iteration(env, network, num_itrs=num_itrs, discount=discount, cql_alpha=cql_alpha_val, weights=weights, render=args.render, sampled=not(weighting_only), training_dataset=training_dataset, transform_type=transform_type, const_transform=const_transform, prefix='finiteCQL/', optimal_policy=optimal_policy)
+# # Compute and plot the value function
+# v_values = np.max(q_values, axis=1)
+# plot_s_values(env, v_values, title='Values', prefix='finiteCQL/')
 
-# Compute and plot the value function
-v_values = np.max(q_values, axis=1)
-plot_s_values(env, v_values, title='Values', prefix='finiteCQL/')
+# #@title Plot Q-functions, overestimation error
 
-#@title Plot Q-functions, overestimation error
+# print('Total Error:', np.sum(np.abs(q_values - optimal_qvalues)))
 
-print('Total Error:', np.sum(np.abs(q_values - optimal_qvalues)))
+# # Compute over-estimation in the training distribution
+# total_overestimation = np.sum((q_values - optimal_qvalues) * weights)
+# print('Total Weighted Overestimation under the training distribution: ', total_overestimation)
 
-# Compute over-estimation in the training distribution
-total_overestimation = np.sum((q_values - optimal_qvalues) * weights)
-print('Total Weighted Overestimation under the training distribution: ', total_overestimation)
+# # Compute over-estimation under the resulting policy
+# policy = compute_policy_deterministic(q_values, eps_greedy=0.1)
+# policy_sa_visitations = compute_visitation(env, policy, T=num_itrs)
+# weights_policy = policy_sa_visitations / np.sum(policy_sa_visitations)
+# total_policy_overestimation = np.sum((q_values - optimal_qvalues) * weights_policy)
+# print ('Total Overestimation under the learned policy: ', total_policy_overestimation)
 
-# Compute over-estimation under the resulting policy
-policy = compute_policy_deterministic(q_values, eps_greedy=0.1)
-policy_sa_visitations = compute_visitation(env, policy, T=num_itrs)
-weights_policy = policy_sa_visitations / np.sum(policy_sa_visitations)
-total_policy_overestimation = np.sum((q_values - optimal_qvalues) * weights_policy)
-print ('Total Overestimation under the learned policy: ', total_policy_overestimation)
+# # Compute unweighted overestimation
+# total_overestimation_unweighted = np.mean((q_values - optimal_qvalues))
+# print ('Total Overestimation: ', total_overestimation_unweighted)
 
-# Compute unweighted overestimation
-total_overestimation_unweighted = np.mean((q_values - optimal_qvalues))
-print ('Total Overestimation: ', total_overestimation_unweighted)
+# plot_sa_values(env, (q_values - optimal_qvalues), title='Q-function Error (Q - Q*)', prefix='finiteCQL/')
 
-plot_sa_values(env, (q_values - optimal_qvalues), title='Q-function Error (Q - Q*)', prefix='finiteCQL/')
+# #@title Compute visitations of the learned policy
+# policy = compute_policy_deterministic(q_values, eps_greedy=0.1)
+# policy_sa_visitations = compute_visitation(env, policy, T=num_itrs)
+# plot_sa_values(env, policy_sa_visitations, title='Q-hat_CQL Visitation', prefix='finiteCQL/')
 
-#@title Compute visitations of the learned policy
-policy = compute_policy_deterministic(q_values, eps_greedy=0.1)
-policy_sa_visitations = compute_visitation(env, policy, T=num_itrs)
-plot_sa_values(env, policy_sa_visitations, title='Q-hat_CQL Visitation', prefix='finiteCQL/')
-
-# save network
-torch.save(network, os.path.join(savepath, 'net_limited.pt'))
+# # save network
+# torch.save(network, os.path.join(savepath, 'net_limited.pt'))

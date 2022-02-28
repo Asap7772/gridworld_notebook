@@ -1,6 +1,6 @@
 MAZE_TYPE=3;
 ENV_TYPE=smooth;
-DES_TYPE=13;
+DES_TYPE=7;
 
 #Variant Test
 
