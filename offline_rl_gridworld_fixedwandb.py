@@ -6,6 +6,8 @@ from foo import Nop
 import numpy as np
 import torch
 
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 parser = argparse.ArgumentParser(description='CQL Hyper Parameters')
 parser.add_argument('--exp_start', type=str, default='cql')
 
@@ -30,6 +32,11 @@ parser.add_argument('--hotstart_it', type=int, default=0)
 
 parser.add_argument('--num_itrs', type=int, default=1000)
 parser.add_argument('--hidden_size', type=int, default=128)
+parser.add_argument('--nogpu', action='store_true')
+
+args = parser.parse_args()
+if args.nogpu:
+    device = torch.device("cpu")
 
 #@title Neural Network Code
 
@@ -42,7 +49,7 @@ def stack_observations(env):
 class FCNetwork(torch.nn.Module):
     def __init__(self, env, layers=[20,20]):
         super(FCNetwork, self).__init__()
-        self.all_observations = torch.tensor(stack_observations(env), dtype=torch.float32)
+        self.all_observations = torch.tensor(stack_observations(env), dtype=torch.float32).to(device)
         dim_input = env.dim_obs
         dim_output = env.num_actions
         net_layers = []
@@ -54,10 +61,10 @@ class FCNetwork(torch.nn.Module):
             dim = layer_size
         net_layers.append(torch.nn.Linear(dim, dim_output))
         self.layers = net_layers
-        self.network = torch.nn.Sequential(*net_layers)
+        self.network = torch.nn.Sequential(*net_layers).to(device)
 
     def forward(self, states):
-        observations = torch.index_select(self.all_observations, 0, states) 
+        observations = torch.index_select(self.all_observations.to(device), 0, states.to(device))
         return self.network(observations)
 
 
@@ -81,9 +88,6 @@ class TabularNetwork(torch.nn.Module):
     def forward(self, states):
         onehot = one_hot(states, self.num_states)
         return self.network(onehot)
-
-
-args = parser.parse_args()
 
 all_args = vars(args)
 name = '{}_maze{}_dataset{}_size{}_env{}_minq{}_ttype{}_const{}'.format(args.exp_start, args.maze_type, args.dataset_composition, args.dataset_size, args.env_type, args.cql_alpha_val, args.transform_type, args.const_transform)
@@ -692,7 +696,7 @@ def q_iteration(env, num_itrs=100, render=False, prefix=None, **kwargs):
 
 def project_qvalues(q_values, network, optimizer, num_steps=50, weights=None):
         # regress onto q_values (aka projection)
-    q_values_tensor = torch.tensor(q_values, dtype=torch.float32)
+    q_values_tensor = torch.tensor(q_values, dtype=torch.float32).to(device)
     for _ in range(num_steps):
              # Eval the network at each state
         pred_qvalues = network(torch.arange(q_values.shape[0]))
@@ -707,7 +711,7 @@ def project_qvalues(q_values, network, optimizer, num_steps=50, weights=None):
 
 def project_qvalues_sampled(env, s, a, target_values, network, optimizer, num_steps=50, weights=None):
     # train with a sampled dataset
-    target_qvalues = torch.tensor(target_values, dtype=torch.float32)
+    target_qvalues = torch.tensor(target_values, dtype=torch.float32).to(device)
     s = torch.tensor(s, dtype=torch.int64)
     a = torch.tensor(a, dtype=torch.int64)
     pred_qvalues = network(s)
@@ -911,11 +915,11 @@ def get_fg(transform_type, const_val):
 
 def project_qvalues_cql(q_values, network, optimizer, num_steps=50, cql_alpha=0.1, weights=None, transform_type=0, const_transform=2, other_network=None, return_loss=False):
     # regress onto q_values (aka projection)
-    q_values_tensor = torch.tensor(q_values, dtype=torch.float32)
+    q_values_tensor = torch.tensor(q_values, dtype=torch.float32).to(device)
     for _ in range(num_steps):
-        pred_qvalues = network(torch.arange(q_values.shape[0]))
+        pred_qvalues = network(torch.arange(q_values.shape[0]).to(device))
         if other_network is not None:
-            other_net_qval = other_network(torch.arange(q_values.shape[0]))
+            other_net_qval = other_network(torch.arange(q_values.shape[0]).to(device))
         else:
             other_net_qval = None
 
@@ -956,14 +960,14 @@ def project_qvalues_cql(q_values, network, optimizer, num_steps=50, cql_alpha=0.
         )
 
     if return_loss:
-        return pred_qvalues.detach().numpy(), loss_statistics
-    return pred_qvalues.detach().numpy()
+        return pred_qvalues.cpu().detach().numpy(), loss_statistics
+    return pred_qvalues.cpu().detach().numpy()
 
 def project_qvalues_cql_sampled(env, s, a, target_values, network, optimizer, cql_alpha=0.1, num_steps=50, weights=None, transform_type=0, const_transform=2, other_network=None, return_loss=False):
     # train with a sampled dataset
-    target_qvalues = torch.tensor(target_values, dtype=torch.float32)
-    s = torch.tensor(s, dtype=torch.int64)
-    a = torch.tensor(a, dtype=torch.int64)    
+    target_qvalues = torch.tensor(target_values, dtype=torch.float32).to(device)
+    s = torch.tensor(s, dtype=torch.int64).to(device)
+    a = torch.tensor(a, dtype=torch.int64).to(device)    
     pred_qvalues = network(s)
     if other_network is not None:
         other_net_qval = other_network(s)
@@ -1008,8 +1012,8 @@ def project_qvalues_cql_sampled(env, s, a, target_values, network, optimizer, cq
     pred_qvalues = network(torch.arange(env.num_states))
 
     if return_loss:
-        return pred_qvalues.detach().numpy(), loss_statistics
-    return pred_qvalues.detach().numpy()
+        return pred_qvalues.cpu().detach().numpy(), loss_statistics
+    return pred_qvalues.cpu().detach().numpy()
 
 def conservative_q_iteration(
     env, 
@@ -1042,14 +1046,19 @@ def conservative_q_iteration(
     dS = env.num_states
     dA = env.num_actions
 
+    network = network.to(device)
+
     optimizer = torch.optim.Adam(network.parameters(), lr=1e-3)
     weights_tensor = None
     if weights is not None:
         weights_tensor = torch.tensor(weights, dtype=torch.float32)
+        weights_tensor = weights_tensor.to(device)
     q_values = np.zeros((dS, dA))
     
     import copy
     other_network = copy.deepcopy(network) if args.hotstart_weight else None
+    if other_network is not None:
+        other_network = other_network.to(device)
     other_q_values = np.zeros((dS, dA))
 
     kls, evals = [],[]
