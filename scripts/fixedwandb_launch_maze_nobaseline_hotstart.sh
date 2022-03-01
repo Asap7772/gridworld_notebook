@@ -7,7 +7,7 @@ DATASET_COMPOSITION=(random+optimal mixed_limited mixed_limited_skewed)
 PREFIX=exp
 PROJ_NAME=algo_gridworlds_hotstart
 COUNTER=0
-NUM_GPUS=8
+NUM_GPUS=$(nvidia-smi -L | wc -l)
 
 for i in "${MAZE_TYPES[@]}"
 do
