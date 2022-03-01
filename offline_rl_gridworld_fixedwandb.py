@@ -5,6 +5,7 @@ from distutils.command.config import config
 from foo import Nop
 import numpy as np
 import torch
+import random
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -33,10 +34,22 @@ parser.add_argument('--hotstart_it', type=int, default=0)
 parser.add_argument('--num_itrs', type=int, default=1000)
 parser.add_argument('--hidden_size', type=int, default=128)
 parser.add_argument('--nogpu', action='store_true')
+parser.add_argument('--num_itrs', type=int, default=42)
 
 args = parser.parse_args()
 if args.nogpu:
     device = torch.device("cpu")
+
+#fix seed
+seed = args.num_itrs
+os.environ['PYTHONHASHSEED'] = str(seed)
+# Torch RNG
+torch.manual_seed(seed)
+torch.cuda.manual_seed(seed)
+torch.cuda.manual_seed_all(seed)
+# Python RNG
+np.random.seed(seed)
+random.seed(seed)
 
 #@title Neural Network Code
 

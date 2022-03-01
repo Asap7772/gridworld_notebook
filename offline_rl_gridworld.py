@@ -29,6 +29,7 @@ parser.add_argument('--load_network', type=str, default='')
 parser.add_argument('--loadnoinit', action='store_true')
 parser.add_argument('--hidden_size', type=int, default=256)
 
+
 #@title Neural Network Code
 
 def stack_observations(env):
