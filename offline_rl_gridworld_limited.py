@@ -26,7 +26,7 @@ parser.add_argument('--proj_name', type=str, default='algo_gridworlds')
 parser.add_argument('--render', action='store_true')
 parser.add_argument('--nowandb', action='store_true')
 
-parser.add_argument('--savepath', type=str, default='/nfs/kun1/users/asap7772/algo_gridworld/data/')
+parser.add_argument('--savepath', type=str, default='/home/asap7772/asap7772/algo_gridworld/data/')
 
 parser.add_argument('--hotstart', action='store_true')
 parser.add_argument('--hotstart_weight', action='store_true')
