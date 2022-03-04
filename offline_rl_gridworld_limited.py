@@ -1,9 +1,12 @@
 import argparse
 from collections import defaultdict
+from copy import copy
 from distutils.command.config import config
 from foo import Nop
 import numpy as np
 import torch
+import random
+import os
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -24,13 +27,30 @@ parser.add_argument('--render', action='store_true')
 parser.add_argument('--nowandb', action='store_true')
 
 parser.add_argument('--savepath', type=str, default='/nfs/kun1/users/asap7772/algo_gridworld/data/')
-parser.add_argument('--hotstart', action='store_true')
-parser.add_argument('--hotstart_it', type=int, default=0)
-parser.add_argument('--othernet', action='store_true') 
-parser.add_argument('--load_network', type=str, default='')
-parser.add_argument('--loadnoinit', action='store_true')
-parser.add_argument('--hidden_size', type=int, default=256)
 
+parser.add_argument('--hotstart', action='store_true')
+parser.add_argument('--hotstart_weight', action='store_true')
+parser.add_argument('--hotstart_it', type=int, default=0)
+
+parser.add_argument('--num_itrs', type=int, default=1000)
+parser.add_argument('--hidden_size', type=int, default=128)
+parser.add_argument('--nogpu', action='store_true')
+parser.add_argument('--seed', type=int, default=42)
+
+args = parser.parse_args()
+if args.nogpu:
+    device = torch.device("cpu")
+
+#fix seed
+seed = args.seed
+os.environ['PYTHONHASHSEED'] = str(seed)
+# Torch RNG
+torch.manual_seed(seed)
+torch.cuda.manual_seed(seed)
+torch.cuda.manual_seed_all(seed)
+# Python RNG
+np.random.seed(seed)
+random.seed(seed)
 
 #@title Neural Network Code
 
@@ -55,10 +75,10 @@ class FCNetwork(torch.nn.Module):
             dim = layer_size
         net_layers.append(torch.nn.Linear(dim, dim_output))
         self.layers = net_layers
-        self.network = torch.nn.Sequential(*net_layers)
+        self.network = torch.nn.Sequential(*net_layers).to(device)
 
     def forward(self, states):
-        observations = torch.index_select(self.all_observations.to(device), 0, states.to(device)) 
+        observations = torch.index_select(self.all_observations.to(device), 0, states.to(device))
         return self.network(observations)
 
 
@@ -83,36 +103,12 @@ class TabularNetwork(torch.nn.Module):
         onehot = one_hot(states, self.num_states)
         return self.network(onehot)
 
-
-args = parser.parse_args()
-
 all_args = vars(args)
 name = '{}_maze{}_dataset{}_size{}_env{}_minq{}_ttype{}_const{}'.format(args.exp_start, args.maze_type, args.dataset_composition, args.dataset_size, args.env_type, args.cql_alpha_val, args.transform_type, args.const_transform)
 
-if args.hotstart:
+if args.hotstart or args.hotstart_weight:
     print('hotstart')
-    name = '{}_hotstart{}'.format(name, args.hotstart_it)
-    if args.othernet:
-        name = '{}_othernet'.format(name)
-
-if args.load_network != '':
-    print('loading networks + qvalues')
-    name = '{}_load'.format(name)
-
-    if args.loadnoinit:
-        name = '{}_noinit'.format(name)
-
-    folder_path = args.load_network
-    q_values_path = '{}/q_values.npy'.format(folder_path)
-    net_full_path = '{}/net_full.pt'.format(folder_path)
-    net_limited_path = '{}/net_limited.pt'.format(folder_path)
-
-    loaded_q_values = np.load(q_values_path)
-    loaded_net_full = torch.load(net_full_path)
-    loaded_net_limited = torch.load(net_limited_path)
-else:
-    loaded_q_values = loaded_net_full = loaded_net_limited = None
-
+    name = '{}_hotstart{}'.format(name, args.hotstart_it) if args.hotstart else '{}_hotstart_weight{}'.format(name, args.hotstart_it)
 
 import os
 savepath = os.path.join(args.savepath + name)
@@ -499,7 +495,7 @@ ACT_OFFSETS = [
 
 PLOT_CMAP = cm.RdYlBu
 
-def plot_sa_values(env, q_values, text_values=True,invert_y=True, update=False, title=None, prefix=None, custom_log={}):
+def plot_sa_values(env, q_values, text_values=True,invert_y=True, update=False, title=None, prefix=None, custom_log={}, step=0):
     w = env.gs.width
     h = env.gs.height
 
@@ -537,11 +533,11 @@ def plot_sa_values(env, q_values, text_values=True,invert_y=True, update=False, 
     full_name = prefix + title
     to_log={full_name: plot}
     to_log.update(custom_log)
-    wandb.log(to_log, step=0)
+    wandb.log(to_log, step=step)
 
     plt.close()
 
-def plot_s_values(env, v_values, text_values=True, invert_y=True, update=False,title=None, prefix=None, custom_log={}):
+def plot_s_values(env, v_values, text_values=True, invert_y=True, update=False,title=None, prefix=None, custom_log={}, step=0):
     w = env.gs.width
     h = env.gs.height
     if update:
@@ -574,7 +570,7 @@ def plot_s_values(env, v_values, text_values=True, invert_y=True, update=False,t
     full_name = prefix + title
     to_log={full_name: plot}
     to_log.update(custom_log)
-    wandb.log(to_log, step=0)
+    wandb.log(to_log, step=step)
     
     plt.close()
 
@@ -931,13 +927,13 @@ def get_fg(transform_type, const_val):
             assert False
     return f,g
 
-def project_qvalues_cql(q_values, network, optimizer, num_steps=50, cql_alpha=0.1, weights=None, transform_type=0, const_transform=2, other_network=loaded_net_full, return_loss=False):
+def project_qvalues_cql(q_values, network, optimizer, num_steps=50, cql_alpha=0.1, weights=None, transform_type=0, const_transform=2, other_network=None, return_loss=False):
     # regress onto q_values (aka projection)
     q_values_tensor = torch.tensor(q_values, dtype=torch.float32).to(device)
     for _ in range(num_steps):
-        pred_qvalues = network(torch.arange(q_values.shape[0])).to(device)
+        pred_qvalues = network(torch.arange(q_values.shape[0]).to(device))
         if other_network is not None:
-            other_net_qval = other_network(torch.arange(q_values.shape[0])).to(device)
+            other_net_qval = other_network(torch.arange(q_values.shape[0]).to(device))
         else:
             other_net_qval = None
 
@@ -978,10 +974,10 @@ def project_qvalues_cql(q_values, network, optimizer, num_steps=50, cql_alpha=0.
         )
 
     if return_loss:
-        return pred_qvalues.detach().cpu().numpy(), loss_statistics
-    return pred_qvalues.detach().cpu().numpy()
+        return pred_qvalues.cpu().detach().numpy(), loss_statistics
+    return pred_qvalues.cpu().detach().numpy()
 
-def project_qvalues_cql_sampled(env, s, a, target_values, network, optimizer, cql_alpha=0.1, num_steps=50, weights=None, transform_type=0, const_transform=2, other_network=loaded_net_limited, return_loss=False):
+def project_qvalues_cql_sampled(env, s, a, target_values, network, optimizer, cql_alpha=0.1, num_steps=50, weights=None, transform_type=0, const_transform=2, other_network=None, return_loss=False):
     # train with a sampled dataset
     target_qvalues = torch.tensor(target_values, dtype=torch.float32).to(device)
     s = torch.tensor(s, dtype=torch.int64).to(device)
@@ -1030,8 +1026,8 @@ def project_qvalues_cql_sampled(env, s, a, target_values, network, optimizer, cq
     pred_qvalues = network(torch.arange(env.num_states))
 
     if return_loss:
-        return pred_qvalues.detach().cpu().numpy(), loss_statistics
-    return pred_qvalues.detach().cpu().numpy()
+        return pred_qvalues.cpu().detach().numpy(), loss_statistics
+    return pred_qvalues.cpu().detach().numpy()
 
 def conservative_q_iteration(
     env, 
@@ -1063,24 +1059,52 @@ def conservative_q_iteration(
     """
     dS = env.num_states
     dA = env.num_actions
-    
+
     network = network.to(device)
+
     optimizer = torch.optim.Adam(network.parameters(), lr=1e-3)
     weights_tensor = None
     if weights is not None:
         weights_tensor = torch.tensor(weights, dtype=torch.float32)
         weights_tensor = weights_tensor.to(device)
-
     q_values = np.zeros((dS, dA))
     
-    if loaded_q_values is not None and not args.loadnoinit:
-        q_values = loaded_q_values
+    import copy
+    other_optimizer = torch.optim.Adam(network.parameters(), lr=1e-3)
+    other_network = copy.deepcopy(network) if args.hotstart_weight else None
+    if other_network is not None:
+        other_network = other_network.to(device)
+    other_q_values = np.zeros((dS, dA))
 
     kls, evals = [],[]
     qmax, qmin, qavg, qstd = [], [],[], []
     losses = defaultdict(list)
     for i in range(num_itrs):
         cond = args.hotstart and i < args.hotstart_it
+        cond_weight = args.hotstart_weight and i < args.hotstart_it
+        
+        assert not(cond and cond_weight), "Either hotstart or hotstart_weight must be false"
+
+        if cond_weight:
+            # hotstart with weights
+            if sampled:
+                for j in range(project_steps):
+                    training_idx = np.random.choice(np.arange(len(training_dataset)), size=128)
+                    s, a, ns, r = get_tensors(training_dataset, training_idx)
+                    target_values = q_backup_sparse_sampled(env, other_q_values, s, a, ns, r, **kwargs)
+                    
+                    intermed_values, loss_statistics = project_qvalues_cql_sampled(
+                        env, s, a, target_values, other_network, other_optimizer, 
+                        cql_alpha=cql_alpha, weights=None, 
+                        transform_type=0, const_transform=const_transform,return_loss=True)
+                    if j == project_steps - 1:
+                        other_q_values = intermed_values
+            else:
+                target_values = q_backup_sparse(env, other_q_values, **kwargs)
+                other_q_values, loss_statistics = project_qvalues_cql(
+                    target_values, other_network, other_optimizer,weights=weights_tensor, 
+                    cql_alpha=cql_alpha, num_steps=project_steps, 
+                    transform_type=0, const_transform=const_transform, return_loss=True)
 
         if sampled:
             for j in range(project_steps):
@@ -1092,7 +1116,8 @@ def conservative_q_iteration(
                     env, s, a, target_values, network, optimizer, 
                     cql_alpha=cql_alpha, weights=None, 
                     transform_type=0 if cond else transform_type, 
-                    const_transform=const_transform,return_loss=True)
+                    const_transform=const_transform,return_loss=True, 
+                    other_network=other_network)
                 if j == project_steps - 1:
                     q_values = intermed_values
         else:
@@ -1101,7 +1126,8 @@ def conservative_q_iteration(
                 target_values, network, optimizer,weights=weights_tensor, 
                 cql_alpha=cql_alpha, num_steps=project_steps, 
                 transform_type=0 if cond else transform_type, 
-                const_transform=const_transform, return_loss=True)
+                const_transform=const_transform, return_loss=True,
+                other_network=other_network)
         
         qmax.append(q_values.max())
         qmin.append(q_values.min())
@@ -1119,103 +1145,33 @@ def conservative_q_iteration(
         policy = compute_policy_deterministic(q_values, eps_greedy=0.1)
         ret = compute_return(env,policy, T=num_itrs)
         evals.append(ret)
+
+    # log weights
+    l = 'full_weight'
+    for i in range(len(losses[l])):
+        weights_cql = losses[l][i]
+        if weights_cql is None:
+            weights_cql = np.ones_like(q_values)/q_values.shape[1] # uniform weights
+        if i == len(losses[l]) - 1:
+            plot_sa_values(env, weights_cql, update=True, title='Final CQL Upweight Term Weights', prefix=prefix)
+    losses.pop(l)
     
-    fig = plt.figure()
-    plt.plot(kls)
-    title = 'KL Divergence from Optimal Policy'
-    plt.title(title)
-
-    plot = wandb.Image(fig)
-    full_name = prefix + title
-    to_log={full_name: plot}
-    to_log.update(custom_log)
-    wandb.log(to_log, step=0)
-    plt.close(fig)
-
-    fig = plt.figure()
-    plt.plot(evals)
-    title = 'Return of Trained Policy'
-    plt.title(title)
-
-    plot = wandb.Image(fig)
-    full_name = prefix + title
-    to_log={full_name: plot}
-    to_log.update(custom_log)
-    wandb.log(to_log, step=0)
-    plt.close(fig)
-
-    fig = plt.figure()
-    plt.plot(qavg)
-    title = 'Q Prediction Mean'
-    plt.title(title)
-
-    plot = wandb.Image(fig)
-    full_name = prefix + title
-    to_log={full_name: plot}
-    to_log.update(custom_log)
-    wandb.log(to_log, step=0)
-    plt.close(fig)
-
-    fig = plt.figure()
-    plt.plot(qmax)
-    title = 'Q Prediction Max'
-    plt.title(title)
-
-    plot = wandb.Image(fig)
-    full_name = prefix + title
-    to_log={full_name: plot}
-    to_log.update(custom_log)
-    wandb.log(to_log, step=0)
-    plt.close(fig)
-
-    fig = plt.figure()
-    plt.plot(qmin)
-    title = 'Q Prediction Min'
-    plt.title(title)
-
-    plot = wandb.Image(fig)
-    full_name = prefix + title
-    to_log={full_name: plot}
-    to_log.update(custom_log)
-    wandb.log(to_log, step=0)
-    plt.close(fig)
-
-    fig = plt.figure()
-    plt.plot(qstd)
-    title = 'Q Prediction Std'
-    plt.title(title)
-
-    plot = wandb.Image(fig)
-    full_name = prefix + title
-    to_log={full_name: plot}
-    to_log.update(custom_log)
-    wandb.log(to_log, step=0)
-    plt.close(fig)
-
-    for l in losses:
-        if l == 'full_weight':
-            for i in range(len(losses[l])):
-                weights_cql = losses[l][i]
-                if weights_cql is None:
-                    weights_cql = np.ones_like(q_values)/q_values.shape[1] # uniform weights
-                if i % 10 == 0:
-                    plot_sa_values(env, weights_cql, update=True, title='CQL Upweight Term Weights/Iteration ' + str(i).zfill(3), prefix=prefix)
-                if i == len(losses[l]) - 1:
-                    plot_sa_values(env, weights_cql, update=True, title='Final CQL Upweight Term Weights', prefix=prefix)
-        else:
-            fig = plt.figure()
-            plt.plot(losses[l])
-            title = l
-            plt.title(title)
-
-            plot = wandb.Image(fig)
-            full_name = prefix + title
-            to_log={full_name: plot}
-            to_log.update(custom_log)
-            wandb.log(to_log, step=0)
-            plt.close(fig)
-
     plot_sa_values(env, q_values, update=True, title='Final Q values', prefix=prefix)
+    
+    things_to_log = {
+        'Q Prediction Max': qmax,
+        'Q Prediction Min': qmin,
+        'Q Prediction Mean': qavg,
+        'Q Prediction Std': qstd,
+        'Return of Trained Policy': evals,
+        'KL Divergence from Optimal Policy': kls,
+    }
+    things_to_log.update(losses)
+    things_to_log = {k: np.array(v).tolist() for k, v in things_to_log.items()}
+    things_to_log = [dict(zip(things_to_log,t)) for t in zip(*things_to_log.values())]
+
+    for i in range(len(things_to_log)):
+       wandb.log(things_to_log[i], step=i)
 
     return q_values
 
@@ -1339,16 +1295,16 @@ else:
     assert False
 
 if maze_type in list(range(0,2)):
-    num_itrs=1000
+    num_itrs=args.num_itrs
     discount=0.95
 elif maze_type in list(range(2,4)):
-    num_itrs=1000
+    num_itrs=args.num_itrs
     discount=0.96
 elif maze_type in list(range(4,6)):    
-    num_itrs=1000
+    num_itrs=args.num_itrs
     discount=0.98
 else:
-    num_itrs=1000
+    num_itrs=args.num_itrs
     discount=0.99
 
 if args.hotstart and args.hotstart_it == 0:
@@ -1434,6 +1390,17 @@ elif dataset_composition == 'mixed':
 if not weighting_only:
     weights_flatten = np.reshape(weights, -1)
     weights_flatten = weights_flatten/ np.sum(weights_flatten)
+
+
+    if dataset_size == -1:
+        dataset_size = env.num_states
+    elif dataset_size == -2:
+        dataset_size = env.num_states * 4
+    elif dataset_size >=0:
+        dataset_size = dataset_size
+    else:
+        assert False
+
     dataset = np.random.choice(
                     np.arange(env.num_states * env.num_actions),
                     size=dataset_size, replace=True, p=weights_flatten
@@ -1461,72 +1428,69 @@ if not weighting_only:
 else:
     plot_sa_values(env, weights, title='Weighting Distribution', prefix='optimal/')
 
-"""### Experiment 2: Correcting for Distributional Shift
+# """### Experiment 2: Correcting for Distributional Shift
 
-In this experiment, we will experiment with the conservative Q-learning (CQL) algorithm that corrects for overestimation of unseen outcomes caused as a result of distributional shift. We've already implemented CQL in the Algorithms section of this colab, and here you will experiment with some design choices such as setting the strength of the constraint ($\alpha$) and you will also measure overestimation in Q-values, and visualize the resulting policy. Try answering the following questions in this experiment:
+# In this experiment, we will experiment with the conservative Q-learning (CQL) algorithm that corrects for overestimation of unseen outcomes caused as a result of distributional shift. We've already implemented CQL in the Algorithms section of this colab, and here you will experiment with some design choices such as setting the strength of the constraint ($\alpha$) and you will also measure overestimation in Q-values, and visualize the resulting policy. Try answering the following questions in this experiment:
 
-- Is CQL able to prevent overestimation that arises in standard off-policy Q-learning as a result for distributional shift compared to that observed in Experiment 1 with the same value of `weighting_scheme`? 
+# - Is CQL able to prevent overestimation that arises in standard off-policy Q-learning as a result for distributional shift compared to that observed in Experiment 1 with the same value of `weighting_scheme`? 
 
-- How do different variants of CQL (v1 vs v2) behave in this setting? To toggle between v1 and v2, check out the  Algorithm block of this colab.
+# - How do different variants of CQL (v1 vs v2) behave in this setting? To toggle between v1 and v2, check out the  Algorithm block of this colab.
 
-- Does CQL learn policies closer to the optimal policy unlike naive off-policy Q-learning? (It should for reasonable values of `cql_alpha`)
+# - Does CQL learn policies closer to the optimal policy unlike naive off-policy Q-learning? (It should for reasonable values of `cql_alpha`)
 
-- How do the values of $\alpha$ (`cql_alpha` parameter in code) affect the performance of CQL? (We would expect that very small values of $\alpha$ are unable to prevent overestimation, some medium values of $\alpha$ effectively balance conservatism and policy learning, while large values of $\alpha$ give rise to overly conservative solutions.)
-"""
+# - How do the values of $\alpha$ (`cql_alpha` parameter in code) affect the performance of CQL? (We would expect that very small values of $\alpha$ are unable to prevent overestimation, some medium values of $\alpha$ effectively balance conservatism and policy learning, while large values of $\alpha$ give rise to overly conservative solutions.)
+# """
 
-#@title Run conservative Q-iteration (or CQL)
+# #@title Run conservative Q-iteration (or CQL)
 
-# Use a tabular or feedforward NN approximator
-network = FCNetwork(env, layers=[args.hidden_size, args.hidden_size])
-#network = TabularNetwork(env)
-
-if loaded_net_full is not None and not args.loadnoinit:
-    network.load_state_dict(loaded_net_full.state_dict())
+# # Use a tabular or feedforward NN approximator
+# network = FCNetwork(env, layers=[args.hidden_size, args.hidden_size])
+# #network = TabularNetwork(env)
 
 
-cql_alpha_val = args.cql_alpha_val # @param {type:"slider", min:0.0, max:10.0, step:0.1}
-transform_type = args.transform_type # @param
-const_transform = args.const_transform # @param
+# cql_alpha_val = args.cql_alpha_val # @param {type:"slider", min:0.0, max:10.0, step:0.1}
+# transform_type = args.transform_type # @param
+# const_transform = args.const_transform # @param
 
-# Run Q-iteration
-q_values = conservative_q_iteration(env, network, num_itrs=num_itrs, discount=discount, cql_alpha=cql_alpha_val, weights=weights, render=args.render, transform_type=transform_type, const_transform=const_transform, prefix='FullCQL/', optimal_policy=optimal_policy)
+# # Run Q-iteration
+# q_values = conservative_q_iteration(env, network, num_itrs=num_itrs, discount=discount, cql_alpha=cql_alpha_val, weights=weights, render=args.render, transform_type=transform_type, const_transform=const_transform, prefix='FullCQL/', optimal_policy=optimal_policy)
 
-q_value_path = os.path.join(savepath, 'q_values.npy')
-np.save(q_value_path, q_values)
+# q_value_path = os.path.join(savepath, 'q_values.npy')
+# np.save(q_value_path, q_values)
 
-# Compute and plot the value function
-v_values = np.max(q_values, axis=1)
-plot_s_values(env, v_values, title='Values', prefix='FullCQL/')
+# # Compute and plot the value function
+# v_values = np.max(q_values, axis=1)
+# plot_s_values(env, v_values, title='Values', prefix='FullCQL/',step=num_itrs)
 
-#@title Plot Q-functions, overestimation error
+# #@title Plot Q-functions, overestimation error
 
-print('Total Error:', np.sum(np.abs(q_values - optimal_qvalues)))
+# print('Total Error:', np.sum(np.abs(q_values - optimal_qvalues)))
 
-# Compute over-estimation in the training distribution
-total_overestimation = np.sum((q_values - optimal_qvalues) * weights)
-print('Total Weighted Overestimation under the training distribution: ', total_overestimation)
+# # Compute over-estimation in the training distribution
+# total_overestimation = np.sum((q_values - optimal_qvalues) * weights)
+# print('Total Weighted Overestimation under the training distribution: ', total_overestimation)
 
-# Compute over-estimation under the resulting policy
-policy = compute_policy_deterministic(q_values, eps_greedy=0.1)
-policy_sa_visitations = compute_visitation(env, policy, T=num_itrs)
-weights_policy = policy_sa_visitations / np.sum(policy_sa_visitations)
-total_policy_overestimation = np.sum((q_values - optimal_qvalues) * weights_policy)
-print ('Total Overestimation under the learned policy: ', total_policy_overestimation)
+# # Compute over-estimation under the resulting policy
+# policy = compute_policy_deterministic(q_values, eps_greedy=0.1)
+# policy_sa_visitations = compute_visitation(env, policy, T=num_itrs)
+# weights_policy = policy_sa_visitations / np.sum(policy_sa_visitations)
+# total_policy_overestimation = np.sum((q_values - optimal_qvalues) * weights_policy)
+# print ('Total Overestimation under the learned policy: ', total_policy_overestimation)
 
-# Compute unweighted overestimation
-total_overestimation_unweighted = np.mean((q_values - optimal_qvalues))
-print ('Total Overestimation: ', total_overestimation_unweighted)
+# # Compute unweighted overestimation
+# total_overestimation_unweighted = np.mean((q_values - optimal_qvalues))
+# print ('Total Overestimation: ', total_overestimation_unweighted)
 
-plot_sa_values(env, (q_values - optimal_qvalues), title='Q-function Error (Q - Q*)', prefix='FullCQL/')
+# plot_sa_values(env, (q_values - optimal_qvalues), title='Q-function Error (Q - Q*)', prefix='FullCQL/',step=num_itrs)
 
-#@title Compute visitations of the learned policy
-policy = compute_policy_deterministic(q_values, eps_greedy=0.1)
-policy_sa_visitations = compute_visitation(env, policy, T=num_itrs)
-plot_sa_values(env, policy_sa_visitations, title='Q-hat_CQL Visitation', prefix='FullCQL/')
-compute_return(env, policy, T=num_itrs)
+# #@title Compute visitations of the learned policy
+# policy = compute_policy_deterministic(q_values, eps_greedy=0.1)
+# policy_sa_visitations = compute_visitation(env, policy, T=num_itrs)
+# plot_sa_values(env, policy_sa_visitations, title='Q-hat_CQL Visitation', prefix='FullCQL/',step=num_itrs)
+# compute_return(env, policy, T=num_itrs)
 
-# save network
-torch.save(network, os.path.join(savepath, 'net_full.pt'))
+# # save network
+# torch.save(network, os.path.join(savepath, 'net_full.pt'))
 
 """### Experiment 3: Offline RL with Distributional Shift + Finite Samples
 
@@ -1546,14 +1510,10 @@ In particular, answer the following questions:
 network = FCNetwork(env, layers=[args.hidden_size, args.hidden_size])
 #network = TabularNetwork(env)
 
-if loaded_net_limited is not None and not args.loadnoinit:
-    network.load_state_dict(loaded_net_limited.state_dict())
-
 cql_alpha_val = args.cql_alpha_val # @param {type:"slider", min:0.0, max:10.0, step:0.01}
 transform_type = args.transform_type # @param
 const_transform = args.const_transform # @param
 
-print (weighting_only)
 # Run Q-iteration
 q_values = conservative_q_iteration(env, network, num_itrs=num_itrs, discount=discount, cql_alpha=cql_alpha_val, weights=weights, render=args.render, sampled=not(weighting_only), training_dataset=training_dataset, transform_type=transform_type, const_transform=const_transform, prefix='finiteCQL/', optimal_policy=optimal_policy)
 

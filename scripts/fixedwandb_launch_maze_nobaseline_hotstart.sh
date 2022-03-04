@@ -21,9 +21,13 @@ do
                 export CUDA_VISIBLE_DEVICES=$((COUNTER%NUM_GPUS))
                 python /home/asap7772/asap7772/algo_gridworld/offline_rl_gridworld_fixedwandb.py --maze_type=$i --env_type=$ENV_TYPE --dataset_composition=$l --cql_alpha_val=$j --transform_type=$DES_TYPE --const_transform=$k --exp_start=$PREFIX --proj_name=$PROJ_NAME --hotstart &
                 let COUNTER++
+
+                if [ $COUNTER -eq $NUM_GPUS ]; then
+                    wait
+                    COUNTER=0
+                fi
             done
         done
-        wait
     done
 done
 

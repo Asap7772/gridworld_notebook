@@ -6,6 +6,7 @@ from foo import Nop
 import numpy as np
 import torch
 import random
+import os
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -34,14 +35,14 @@ parser.add_argument('--hotstart_it', type=int, default=0)
 parser.add_argument('--num_itrs', type=int, default=1000)
 parser.add_argument('--hidden_size', type=int, default=128)
 parser.add_argument('--nogpu', action='store_true')
-parser.add_argument('--num_itrs', type=int, default=42)
+parser.add_argument('--seed', type=int, default=42)
 
 args = parser.parse_args()
 if args.nogpu:
     device = torch.device("cpu")
 
 #fix seed
-seed = args.num_itrs
+seed = args.seed
 os.environ['PYTHONHASHSEED'] = str(seed)
 # Torch RNG
 torch.manual_seed(seed)
@@ -1069,6 +1070,7 @@ def conservative_q_iteration(
     q_values = np.zeros((dS, dA))
     
     import copy
+    other_optimizer = torch.optim.Adam(network.parameters(), lr=1e-3)
     other_network = copy.deepcopy(network) if args.hotstart_weight else None
     if other_network is not None:
         other_network = other_network.to(device)
@@ -1092,7 +1094,7 @@ def conservative_q_iteration(
                     target_values = q_backup_sparse_sampled(env, other_q_values, s, a, ns, r, **kwargs)
                     
                     intermed_values, loss_statistics = project_qvalues_cql_sampled(
-                        env, s, a, target_values, other_network, optimizer, 
+                        env, s, a, target_values, other_network, other_optimizer, 
                         cql_alpha=cql_alpha, weights=None, 
                         transform_type=0, const_transform=const_transform,return_loss=True)
                     if j == project_steps - 1:
@@ -1100,7 +1102,7 @@ def conservative_q_iteration(
             else:
                 target_values = q_backup_sparse(env, other_q_values, **kwargs)
                 other_q_values, loss_statistics = project_qvalues_cql(
-                    target_values, other_network, optimizer,weights=weights_tensor, 
+                    target_values, other_network, other_optimizer,weights=weights_tensor, 
                     cql_alpha=cql_alpha, num_steps=project_steps, 
                     transform_type=0, const_transform=const_transform, return_loss=True)
 
