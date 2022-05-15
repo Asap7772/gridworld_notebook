@@ -26,7 +26,7 @@ parser.add_argument('--proj_name', type=str, default='algo_gridworlds')
 parser.add_argument('--render', action='store_true')
 parser.add_argument('--nowandb', action='store_true')
 
-parser.add_argument('--savepath', type=str, default='/home/asap7772/asap7772/algo_gridworld/data/')
+parser.add_argument('--savepath', type=str, default='/home/asap7772/asap7772/algo_gridworld/data_0514/')
 
 parser.add_argument('--hotstart', action='store_true')
 parser.add_argument('--hotstart_weight', action='store_true')
@@ -1549,3 +1549,17 @@ plot_sa_values(env, policy_sa_visitations, title='Q-hat_CQL Visitation', prefix=
 
 # save network
 torch.save(network, os.path.join(savepath, 'net_limited.pt'))
+
+things_to_save = {
+    'q_values': q_values,
+    'optimal_qvalues': optimal_qvalues,
+    'weights': weights,
+    'policy': policy,
+    'policy_sa_visitations': policy_sa_visitations,
+    'weights_policy': weights_policy,
+}
+
+import pickle
+with open(os.path.join(savepath, 'data.pkl'), 'wb') as f:
+    pickle.dump(things_to_save, f)
+
