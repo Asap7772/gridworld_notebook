@@ -470,6 +470,36 @@ class GridEnv(object):
             self._transition_matrix = transition_matrix
         return self._transition_matrix
 
+def sample(policy, s):
+    return np.random.choice(policy.shape[1], p=policy[s])
+ 
+def rollout(env, policy, max_steps=50, render=False, verbose=False):
+    s = env.reset()
+    assert policy.shape[0] == env.num_states
+    assert policy.shape[1] == env.num_actions
+    
+    transitions = []
+    
+    total_reward = 0
+    for i in range(max_steps):
+        if render:
+            env.render()
+        a = sample(policy, s)
+        ns, r, done, _ = env.step(a)
+        total_reward += r
+        
+        tuple_trans = (s, a, r, ns)
+        transitions.append(tuple_trans)
+        
+        if done:
+            break
+        
+        if verbose:
+            print("Step %d: s=%d, a=%d, ns=%d, r=%f" % (i, s, a, ns, r))
+    
+    return transitions, total_reward
+
+
 #@title Plotting Code
 PLT_NOOP = np.array([[-0.1,0.1], [-0.1,-0.1], [0.1,-0.1], [0.1,0.1]])
 PLT_UP = np.array([[0,0], [0.5,0.5], [-0.5,0.5]])
@@ -581,6 +611,11 @@ def compute_policy_deterministic(q_values, eps_greedy=0.0):
     policy_probs = np.zeros_like(q_values)
     policy_probs[np.arange(policy_probs.shape[0]), np.argmax(q_values, axis=1)] = 1.0 - eps_greedy
     policy_probs += eps_greedy / (policy_probs.shape[1])
+    return policy_probs
+
+def compute_policy_stochastic(q_values, temp=1.0):
+    policy_probs = np.exp(q_values / temp)
+    policy_probs = policy_probs / (np.sum(policy_probs, axis=1, keepdims=True) + 1e-8)
     return policy_probs
 
 def compute_visitation(env, policy, discount=1.0, T=50):
